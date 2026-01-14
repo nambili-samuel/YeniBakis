@@ -87,6 +87,90 @@ def fetch_image(url):
         print(f"Image fetch error for {url}: {e}")
         return None
 
+def extract_wordpress_thumbnail(entry):
+    """Extract thumbnail from WordPress RSS feed"""
+    thumbnail_url = None
+    
+    # Method 1: media:content
+    if hasattr(entry, 'media_content') and entry.media_content:
+        thumbnail_url = entry.media_content[0].get('url')
+        if thumbnail_url:
+            print(f"Found thumbnail via media_content: {thumbnail_url}")
+            return thumbnail_url
+    
+    # Method 2: media:thumbnail
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        thumbnail_url = entry.media_thumbnail[0].get('url')
+        if thumbnail_url:
+            print(f"Found thumbnail via media_thumbnail: {thumbnail_url}")
+            return thumbnail_url
+    
+    # Method 3: enclosures
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enclosure in entry.enclosures:
+            if 'image' in enclosure.get('type', '').lower():
+                thumbnail_url = enclosure.get('href') or enclosure.get('url')
+                if thumbnail_url:
+                    print(f"Found thumbnail via enclosures: {thumbnail_url}")
+                    return thumbnail_url
+    
+    # Method 4: Parse content/description for img tags
+    import re
+    for field in ['content', 'description', 'summary']:
+        if hasattr(entry, field):
+            content = getattr(entry, field)
+            if isinstance(content, list):
+                content = content[0].get('value', '') if content else ''
+            
+            # Look for img tags
+            img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', str(content))
+            if img_match:
+                thumbnail_url = img_match.group(1)
+                print(f"Found thumbnail via {field} img tag: {thumbnail_url}")
+                return thumbnail_url
+    
+    return None
+
+def extract_youtube_thumbnail(entry, link):
+    """Extract high-quality thumbnail from YouTube"""
+    thumbnail_url = None
+    video_id = None
+    
+    # Try to get video ID from entry
+    if hasattr(entry, 'yt_videoid'):
+        video_id = entry.yt_videoid
+    elif 'v=' in link:
+        video_id = link.split('v=')[1].split('&')[0]
+    
+    if video_id:
+        print(f"YouTube video ID: {video_id}")
+        # Try different quality thumbnails in order of preference
+        thumbnail_urls = [
+            f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+            f"https://i.ytimg.com/vi/{video_id}/sddefault.jpg",
+            f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        ]
+        
+        for url in thumbnail_urls:
+            # Quick check if thumbnail exists
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                r = requests.head(url, timeout=5, headers=headers)
+                if r.status_code == 200:
+                    print(f"✓ Found YouTube thumbnail: {url}")
+                    return url
+            except:
+                continue
+    
+    # Fallback to media_thumbnail if available
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        thumbnail_url = entry.media_thumbnail[0].get('url')
+        if thumbnail_url:
+            print(f"Using YouTube media_thumbnail: {thumbnail_url}")
+            return thumbnail_url
+    
+    return None
+
 # Parse RSS feed with proper encoding
 feed = feedparser.parse(RSS_URL)
 
@@ -105,44 +189,19 @@ import re
 summary = re.sub('<[^<]+?>', '', summary)
 summary = summary.strip()
 
+# Detect source type and extract thumbnail accordingly
 thumbnail_url = None
+is_youtube = 'youtube.com' in RSS_URL.lower() or 'youtu.be' in RSS_URL.lower()
 
-# WordPress - check multiple possible fields
-if "media_content" in entry and entry.media_content:
-    thumbnail_url = entry.media_content[0].get("url")
-elif "media_thumbnail" in entry and entry.media_thumbnail:
-    # YouTube - try to get highest quality thumbnail
-    thumbnail_url = entry.media_thumbnail[0].get("url")
-    
-    # YouTube provides different quality thumbnails, try to get higher quality
-    if thumbnail_url and "youtube" in RSS_URL.lower():
-        # Extract video ID and construct high-quality thumbnail URL
-        video_id = None
-        if "yt:videoId" in entry:
-            video_id = entry.yt_videoid
-        elif "youtube.com/watch?v=" in link:
-            video_id = link.split("v=")[1].split("&")[0]
-        
-        if video_id:
-            # Try maxresdefault first (highest quality)
-            high_quality_urls = [
-                f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
-                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-                thumbnail_url  # fallback to original
-            ]
-            
-            for url in high_quality_urls:
-                test_img = fetch_image(url)
-                if test_img:
-                    thumbnail_url = url
-                    break
+if is_youtube:
+    print("Detected YouTube RSS feed")
+    thumbnail_url = extract_youtube_thumbnail(entry, link)
+else:
+    print("Detected WordPress RSS feed")
+    thumbnail_url = extract_wordpress_thumbnail(entry)
 
-# Check for enclosures (another common RSS field for images)
-elif hasattr(entry, 'enclosures') and entry.enclosures:
-    for enclosure in entry.enclosures:
-        if 'image' in enclosure.get('type', ''):
-            thumbnail_url = enclosure.get('href') or enclosure.get('url')
-            break
+if not thumbnail_url:
+    print("⚠ No thumbnail found in RSS feed")
 
 # Check if this post was already published
 last_link = get_last_link()
@@ -169,7 +228,7 @@ if thumbnail_url:
     else:
         print("✗ Could not fetch thumbnail")
 else:
-    print("No thumbnail URL found")
+    print("⚠ No thumbnail to upload")
 
 # Create embed with proper Turkish character support
 embed = {
@@ -183,9 +242,11 @@ embed = {
 
 if thumb_blob:
     embed["external"]["thumb"] = thumb_blob
+    print("✓ Embed created with thumbnail")
+else:
+    print("⚠ Embed created without thumbnail")
 
 # Create post text with proper formatting
-# Use emoji that work well across platforms
 post_text = f"📰 Yeni içerik yayında!\n\n{title[:280]}"
 
 # Post to Bluesky
@@ -195,6 +256,10 @@ try:
     print("✓ Posted successfully to Bluesky!")
     print(f"  Title: {title}")
     print(f"  Link: {link}")
+    if thumb_blob:
+        print(f"  Thumbnail: Yes")
+    else:
+        print(f"  Thumbnail: No")
 except Exception as e:
     print(f"✗ Posting failed: {e}")
     exit(1)
