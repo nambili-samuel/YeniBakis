@@ -1,0 +1,31 @@
+name: RSS to Bluesky Bot
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install feedparser atproto
+
+      - run: python post_to_bluesky.py
+        env:
+          RSS_URL: ${{ secrets.RSS_URL }}
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+
+      - run: |
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add last_post.json || true
+          git commit -m "Update last posted RSS item" || true
+          git push || true
