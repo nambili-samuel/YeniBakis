@@ -6,7 +6,7 @@ I have built bots from scratch before, but this time I created a fully self-runn
 
 The bot's workflow is simple: scrape a landing page, retrieve news and related images from the website, scrape YouTube, summarise each piece of content, and then post it to Bluesky. Easy!
 
-The entire process, from initial scrape to final social media post, takes no more than a few seconds. While there is a large ecosystem of libraries available, like npm for Node.js which offers packages for scraping, APIs, databases, and more, I chose Python, my favourite programming language. This allowed me to leverage existing, well-tested libraries and saved considerable time and effort.
+The entire process, from initial scrape to final social media post, takes no more than a few seconds. While there is a large ecosystem of libraries available, like npm for Node.js which offers packages for developing smart bots, agents, accessing APIs, databases, and more, I chose Python, my favourite programming language. This allowed me to use only few files and leverage well-tested existing libraries and saved considerable time and effort.
 
 <img src="https://github.com/nambili-samuel/YeniBakis/blob/main/BlueSkyBot.gif?raw=true" alt="Bluesky Bot Workflow" style="width:100%; max-width:600px; height:auto;">
 
