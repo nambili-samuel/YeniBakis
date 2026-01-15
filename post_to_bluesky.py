@@ -1,9 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
+import sys
 import feedparser
 import requests
 from atproto import Client
 from io import BytesIO
 from PIL import Image
+import re
+from datetime import datetime
+
+# Force UTF-8 encoding for stdout
+sys.stdout.reconfigure(encoding='utf-8')
 
 RSS_URL = os.environ["RSS_URL"]
 BSKY_HANDLE = os.environ["BSKY_HANDLE"]
@@ -13,14 +22,17 @@ STATE_FILE = "last_post.txt"
 MAX_IMAGE_SIZE = 976_000  # ~950 KB (1MB limit with safety margin)
 
 def get_last_link():
+    """Get the last posted article link"""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
     return ""
 
 def save_last_link(link):
+    """Save the last posted article link"""
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         f.write(link)
+    print(f"✓ Durum kaydedildi: {link[:50]}...")
 
 def optimize_image(image_data):
     """Optimize image to fit within size limit while maintaining quality"""
@@ -36,28 +48,33 @@ def optimize_image(image_data):
                 background.paste(img, mask=img.split()[-1])
             img = background
         
-        # Resize if too large
+        # Resize if too large (maintain aspect ratio)
         max_dimension = 2000
         if max(img.size) > max_dimension:
-            img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+            ratio = max_dimension / max(img.size)
+            new_size = tuple(int(dim * ratio) for dim in img.size)
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
         
-        # Save with optimization
+        # Save with progressive optimization
         output = BytesIO()
         quality = 85
         
         while quality > 20:
             output.seek(0)
             output.truncate()
-            img.save(output, format='JPEG', quality=quality, optimize=True)
+            img.save(output, format='JPEG', quality=quality, optimize=True, progressive=True)
             
             if output.tell() <= MAX_IMAGE_SIZE:
+                print(f"✓ Görsel optimize edildi: {len(image_data)} -> {output.tell()} bytes (kalite: {quality})")
                 return output.getvalue()
             
             quality -= 5
         
+        print("⚠ Görsel optimize edilemedi, boyut sınırı aşılıyor")
         return None
+        
     except Exception as e:
-        print(f"Image optimization error: {e}")
+        print(f"✗ Görsel optimizasyon hatası: {e}")
         return None
 
 def fetch_image(url):
@@ -66,15 +83,18 @@ def fetch_image(url):
         return None
     
     try:
-        # Add headers to avoid being blocked
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
         }
         
+        print(f"📥 Görsel indiriliyor: {url}")
         r = requests.get(url, timeout=15, headers=headers, stream=True)
         r.raise_for_status()
         
         content = r.content
+        print(f"✓ Görsel indirildi: {len(content)} bytes")
         
         # If image is already small enough, return it
         if len(content) <= MAX_IMAGE_SIZE:
@@ -84,66 +104,100 @@ def fetch_image(url):
         return optimize_image(content)
         
     except Exception as e:
-        print(f"Image fetch error for {url}: {e}")
+        print(f"✗ Görsel indirme hatası ({url}): {e}")
         return None
 
+def clean_html(text):
+    """Remove HTML tags and clean text"""
+    if not text:
+        return ""
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Clean up whitespace
+    text = re.sub(r'\s+', ' ', text)
+    # Decode HTML entities
+    text = text.replace('&nbsp;', ' ')
+    text = text.replace('&quot;', '"')
+    text = text.replace('&apos;', "'")
+    text = text.replace('&amp;', '&')
+    text = text.replace('&lt;', '<')
+    text = text.replace('&gt;', '>')
+    return text.strip()
+
 def extract_wordpress_thumbnail(entry):
-    """Extract thumbnail from WordPress RSS feed"""
-    thumbnail_url = None
+    """Extract thumbnail from WordPress RSS feed with multiple methods"""
     
     # Method 1: media:content
     if hasattr(entry, 'media_content') and entry.media_content:
-        thumbnail_url = entry.media_content[0].get('url')
-        if thumbnail_url:
-            print(f"Found thumbnail via media_content: {thumbnail_url}")
-            return thumbnail_url
+        url = entry.media_content[0].get('url')
+        if url:
+            print(f"✓ Thumbnail bulundu (media:content): {url}")
+            return url
     
     # Method 2: media:thumbnail
     if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
-        thumbnail_url = entry.media_thumbnail[0].get('url')
-        if thumbnail_url:
-            print(f"Found thumbnail via media_thumbnail: {thumbnail_url}")
-            return thumbnail_url
+        url = entry.media_thumbnail[0].get('url')
+        if url:
+            print(f"✓ Thumbnail bulundu (media:thumbnail): {url}")
+            return url
     
     # Method 3: enclosures
     if hasattr(entry, 'enclosures') and entry.enclosures:
         for enclosure in entry.enclosures:
-            if 'image' in enclosure.get('type', '').lower():
-                thumbnail_url = enclosure.get('href') or enclosure.get('url')
-                if thumbnail_url:
-                    print(f"Found thumbnail via enclosures: {thumbnail_url}")
-                    return thumbnail_url
+            enc_type = enclosure.get('type', '').lower()
+            if 'image' in enc_type:
+                url = enclosure.get('href') or enclosure.get('url')
+                if url:
+                    print(f"✓ Thumbnail bulundu (enclosure): {url}")
+                    return url
     
-    # Method 4: Parse content/description for img tags
-    import re
+    # Method 4: Parse content/description/summary for img tags
     for field in ['content', 'description', 'summary']:
         if hasattr(entry, field):
-            content = getattr(entry, field)
-            if isinstance(content, list):
-                content = content[0].get('value', '') if content else ''
+            content_val = getattr(entry, field)
             
-            # Look for img tags
-            img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', str(content))
-            if img_match:
-                thumbnail_url = img_match.group(1)
-                print(f"Found thumbnail via {field} img tag: {thumbnail_url}")
-                return thumbnail_url
+            # Handle list content (like Atom feeds)
+            if isinstance(content_val, list) and content_val:
+                content_val = content_val[0].get('value', '') if isinstance(content_val[0], dict) else str(content_val[0])
+            
+            content_str = str(content_val)
+            
+            # Look for img tags with src attribute
+            img_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', content_str, re.IGNORECASE)
+            if img_matches:
+                # Get first reasonable image (skip small icons)
+                for img_url in img_matches:
+                    # Skip data URIs, tracking pixels, and very small images
+                    if (not img_url.startswith('data:') and 
+                        'spacer' not in img_url.lower() and 
+                        'pixel' not in img_url.lower() and
+                        '1x1' not in img_url.lower()):
+                        print(f"✓ Thumbnail bulundu ({field} img tag): {img_url}")
+                        return img_url
     
+    print("⚠ Thumbnail bulunamadı")
     return None
 
 def extract_youtube_thumbnail(entry, link):
     """Extract high-quality thumbnail from YouTube"""
-    thumbnail_url = None
     video_id = None
     
     # Try to get video ID from entry
     if hasattr(entry, 'yt_videoid'):
         video_id = entry.yt_videoid
-    elif 'v=' in link:
+    elif hasattr(entry, 'id'):
+        # YouTube RSS sometimes has video ID in the id field
+        id_str = str(entry.id)
+        if 'yt:video:' in id_str:
+            video_id = id_str.split('yt:video:')[-1]
+    
+    # Extract from link if not found
+    if not video_id and 'v=' in link:
         video_id = link.split('v=')[1].split('&')[0]
     
     if video_id:
-        print(f"YouTube video ID: {video_id}")
+        print(f"✓ YouTube video ID: {video_id}")
+        
         # Try different quality thumbnails in order of preference
         thumbnail_urls = [
             f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
@@ -152,83 +206,102 @@ def extract_youtube_thumbnail(entry, link):
         ]
         
         for url in thumbnail_urls:
-            # Quick check if thumbnail exists
             try:
                 headers = {'User-Agent': 'Mozilla/5.0'}
-                r = requests.head(url, timeout=5, headers=headers)
+                r = requests.head(url, timeout=5, headers=headers, allow_redirects=True)
                 if r.status_code == 200:
-                    print(f"✓ Found YouTube thumbnail: {url}")
+                    print(f"✓ YouTube thumbnail bulundu: {url}")
                     return url
             except:
                 continue
     
-    # Fallback to media_thumbnail if available
+    # Fallback to media_thumbnail
     if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
-        thumbnail_url = entry.media_thumbnail[0].get('url')
-        if thumbnail_url:
-            print(f"Using YouTube media_thumbnail: {thumbnail_url}")
-            return thumbnail_url
+        url = entry.media_thumbnail[0].get('url')
+        if url:
+            print(f"✓ YouTube media_thumbnail kullanılıyor: {url}")
+            return url
     
+    print("⚠ YouTube thumbnail bulunamadı")
     return None
 
-# Parse RSS feed with proper encoding
+# Parse RSS feed with UTF-8 support
+print(f"\n{'='*60}")
+print(f"📰 RSS Feed İşleniyor: {RSS_URL}")
+print(f"{'='*60}\n")
+
 feed = feedparser.parse(RSS_URL)
 
 if not feed.entries:
-    print("No entries found in RSS feed.")
-    exit(0)
+    print("⚠ RSS beslemesinde içerik bulunamadı.")
+    sys.exit(0)
+
+print(f"✓ RSS beslemesi okundu: {len(feed.entries)} içerik bulundu\n")
 
 entry = feed.entries[0]
 
+# Extract basic info
 title = entry.title
 link = entry.link
 summary = entry.get("summary", entry.get("description", title))
+summary_clean = clean_html(summary)
 
-# Remove HTML tags from summary
-import re
-summary = re.sub('<[^<]+?>', '', summary)
-summary = summary.strip()
+print(f"📌 En son içerik:")
+print(f"   Başlık: {title}")
+print(f"   Link: {link}")
+print(f"   Özet: {summary_clean[:100]}...")
 
-# Detect source type and extract thumbnail accordingly
-thumbnail_url = None
-is_youtube = 'youtube.com' in RSS_URL.lower() or 'youtu.be' in RSS_URL.lower()
-
-if is_youtube:
-    print("Detected YouTube RSS feed")
-    thumbnail_url = extract_youtube_thumbnail(entry, link)
-else:
-    print("Detected WordPress RSS feed")
-    thumbnail_url = extract_wordpress_thumbnail(entry)
-
-if not thumbnail_url:
-    print("⚠ No thumbnail found in RSS feed")
-
-# Check if this post was already published
+# Check if already posted
 last_link = get_last_link()
 if link == last_link:
-    print("No new content.")
-    exit(0)
+    print(f"\n⏭ Bu içerik zaten paylaşıldı.")
+    print(f"   Son paylaşılan: {last_link}")
+    print(f"   Şu anki içerik: {link}")
+    print(f"\n✓ Yeni içerik yok. Bot durdu.\n")
+    sys.exit(0)
+
+print(f"\n✅ YENİ İÇERİK TESPİT EDİLDİ!")
+print(f"   Son paylaşılan: {last_link if last_link else '(İlk paylaşım)'}")
+print(f"   Yeni içerik: {link}\n")
+
+# Detect source type and extract thumbnail
+is_youtube = 'youtube.com' in RSS_URL.lower() or 'youtu.be' in RSS_URL.lower()
+
+print(f"🔍 Kaynak tipi: {'YouTube' if is_youtube else 'WordPress/RSS'}\n")
+
+thumbnail_url = None
+if is_youtube:
+    thumbnail_url = extract_youtube_thumbnail(entry, link)
+else:
+    thumbnail_url = extract_wordpress_thumbnail(entry)
 
 # Login to Bluesky
+print(f"\n🔐 Bluesky'a giriş yapılıyor...")
 client = Client()
-client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
+try:
+    client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
+    print(f"✓ Bluesky girişi başarılı: {BSKY_HANDLE}\n")
+except Exception as e:
+    print(f"✗ Bluesky giriş hatası: {e}")
+    sys.exit(1)
 
 # Fetch and upload thumbnail
 thumb_blob = None
 if thumbnail_url:
-    print(f"Fetching thumbnail from: {thumbnail_url}")
+    print(f"📸 Thumbnail işleniyor...")
     image_data = fetch_image(thumbnail_url)
     
     if image_data:
         try:
             thumb_blob = client.upload_blob(image_data).blob
-            print("✓ Thumbnail uploaded successfully")
+            print(f"✓ Thumbnail Bluesky'a yüklendi\n")
         except Exception as e:
-            print(f"✗ Thumbnail upload failed: {e}")
+            print(f"✗ Thumbnail yükleme hatası: {e}")
+            print(f"⚠ Thumbnail olmadan devam ediliyor...\n")
     else:
-        print("✗ Could not fetch thumbnail")
+        print(f"⚠ Thumbnail indirilemedi, devam ediliyor...\n")
 else:
-    print("⚠ No thumbnail to upload")
+    print(f"⚠ Thumbnail bulunamadı, devam ediliyor...\n")
 
 # Create embed with proper Turkish character support
 embed = {
@@ -236,30 +309,41 @@ embed = {
     "external": {
         "uri": link,
         "title": title[:300],  # Bluesky title limit
-        "description": summary[:300],  # Truncate description
+        "description": summary_clean[:300],  # Truncate description
     },
 }
 
 if thumb_blob:
     embed["external"]["thumb"] = thumb_blob
-    print("✓ Embed created with thumbnail")
+    print(f"✓ Embed thumbnail ile oluşturuldu")
 else:
-    print("⚠ Embed created without thumbnail")
+    print(f"⚠ Embed thumbnail olmadan oluşturuldu")
 
-# Create post text with proper formatting
+# Create post text with proper Turkish formatting
+# Use proper emoji that displays correctly
 post_text = f"📰 Yeni içerik yayında!\n\n{title[:280]}"
 
 # Post to Bluesky
+print(f"\n📤 Bluesky'a gönderiliyor...")
+print(f"{'='*60}")
+
 try:
     client.post(text=post_text, embed=embed)
     save_last_link(link)
-    print("✓ Posted successfully to Bluesky!")
-    print(f"  Title: {title}")
-    print(f"  Link: {link}")
-    if thumb_blob:
-        print(f"  Thumbnail: Yes")
-    else:
-        print(f"  Thumbnail: No")
+    
+    print(f"\n{'='*60}")
+    print(f"✅ BAŞARIYLA PAYLAŞILDI!")
+    print(f"{'='*60}")
+    print(f"📌 Başlık: {title}")
+    print(f"🔗 Link: {link}")
+    print(f"🖼️  Thumbnail: {'Evet ✓' if thumb_blob else 'Hayır ✗'}")
+    print(f"⏰ Zaman: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}\n")
+    
 except Exception as e:
-    print(f"✗ Posting failed: {e}")
-    exit(1)
+    print(f"\n{'='*60}")
+    print(f"✗ PAYLAŞIM HATASI!")
+    print(f"{'='*60}")
+    print(f"Hata: {e}")
+    print(f"{'='*60}\n")
+    sys.exit(1)
