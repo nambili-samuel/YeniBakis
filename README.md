@@ -14,7 +14,7 @@ GitHub Actions provides critical infrastructure for the bot in several ways. Aut
 
 You can customise the bot to your liking. Change the scraping targets, refine the LLM prompts, extend posting functionality, or add new features. Drop a pull request if you need help with deployment or running it.
 
-Credit goes to Dr. Nambili Samuel, the AI researcher and developer who built this AI agent for social media automation.
+Credit goes to Dr. Nambili Samuel, the AI researcher and developer who built this AI agent for [Yeni Bakış Gazetesi](https://yenibakisgazetesi.com) social media automation.
 
 
 
