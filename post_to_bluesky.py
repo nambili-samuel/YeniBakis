@@ -10,9 +10,11 @@ from io import BytesIO
 from PIL import Image
 import re
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 # Force UTF-8 encoding for stdout
-sys.stdout.reconfigure(encoding='utf-8')
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 RSS_URL = os.environ["RSS_URL"]
 BSKY_HANDLE = os.environ["BSKY_HANDLE"]
@@ -86,7 +88,8 @@ def fetch_image(url):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://yenibakisgazetesi.com/'
         }
         
         print(f"📥 Görsel indiriliyor: {url}")
@@ -117,66 +120,87 @@ def clean_html(text):
     text = re.sub(r'\s+', ' ', text)
     # Decode HTML entities
     text = text.replace('&nbsp;', ' ')
+    text = text.replace('&#8217;', "'")
+    text = text.replace('&#8220;', '"')
+    text = text.replace('&#8221;', '"')
+    text = text.replace('&#8216;', "'")
     text = text.replace('&quot;', '"')
     text = text.replace('&apos;', "'")
     text = text.replace('&amp;', '&')
     text = text.replace('&lt;', '<')
     text = text.replace('&gt;', '>')
+    # Remove CDATA markers
+    text = text.replace('<![CDATA[', '')
+    text = text.replace(']]>', '')
     return text.strip()
 
-def extract_wordpress_thumbnail(entry):
-    """Extract thumbnail from WordPress RSS feed with multiple methods"""
+def fetch_article_thumbnail(article_url):
+    """Fetch featured image from WordPress article page"""
+    if not article_url or article_url == '#':
+        return None
     
-    # Method 1: media:content
-    if hasattr(entry, 'media_content') and entry.media_content:
-        url = entry.media_content[0].get('url')
-        if url:
-            print(f"✓ Thumbnail bulundu (media:content): {url}")
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+        
+        print(f"🌐 Makale sayfası açılıyor: {article_url}")
+        response = requests.get(article_url, timeout=15, headers=headers)
+        response.encoding = 'utf-8'
+        
+        if response.status_code != 200:
+            print(f"⚠ Makale sayfası yüklenemedi: HTTP {response.status_code}")
+            return None
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Method 1: Open Graph image (most reliable for WordPress)
+        og_image = soup.find('meta', property='og:image')
+        if og_image and og_image.get('content'):
+            url = og_image['content']
+            print(f"✓ Thumbnail bulundu (og:image): {url}")
             return url
-    
-    # Method 2: media:thumbnail
-    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
-        url = entry.media_thumbnail[0].get('url')
-        if url:
-            print(f"✓ Thumbnail bulundu (media:thumbnail): {url}")
+        
+        # Method 2: Twitter card image
+        twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
+        if twitter_image and twitter_image.get('content'):
+            url = twitter_image['content']
+            print(f"✓ Thumbnail bulundu (twitter:image): {url}")
             return url
-    
-    # Method 3: enclosures
-    if hasattr(entry, 'enclosures') and entry.enclosures:
-        for enclosure in entry.enclosures:
-            enc_type = enclosure.get('type', '').lower()
-            if 'image' in enc_type:
-                url = enclosure.get('href') or enclosure.get('url')
-                if url:
-                    print(f"✓ Thumbnail bulundu (enclosure): {url}")
-                    return url
-    
-    # Method 4: Parse content/description/summary for img tags
-    for field in ['content', 'description', 'summary']:
-        if hasattr(entry, field):
-            content_val = getattr(entry, field)
-            
-            # Handle list content (like Atom feeds)
-            if isinstance(content_val, list) and content_val:
-                content_val = content_val[0].get('value', '') if isinstance(content_val[0], dict) else str(content_val[0])
-            
-            content_str = str(content_val)
-            
-            # Look for img tags with src attribute
-            img_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', content_str, re.IGNORECASE)
-            if img_matches:
-                # Get first reasonable image (skip small icons)
-                for img_url in img_matches:
-                    # Skip data URIs, tracking pixels, and very small images
-                    if (not img_url.startswith('data:') and 
-                        'spacer' not in img_url.lower() and 
-                        'pixel' not in img_url.lower() and
-                        '1x1' not in img_url.lower()):
-                        print(f"✓ Thumbnail bulundu ({field} img tag): {img_url}")
-                        return img_url
-    
-    print("⚠ Thumbnail bulunamadı")
-    return None
+        
+        # Method 3: WordPress featured image
+        featured_img = soup.select_one('.wp-post-image, .featured-image img, article img, .entry-content img')
+        if featured_img and featured_img.get('src'):
+            url = featured_img['src']
+            # Skip tiny images
+            if 'placeholder' not in url.lower() and '1x1' not in url.lower():
+                print(f"✓ Thumbnail bulundu (featured image): {url}")
+                return url
+        
+        # Method 4: First large image in content
+        content_images = soup.select('article img, .entry-content img, .post-content img')
+        for img in content_images:
+            src = img.get('src') or img.get('data-src')
+            if src and 'placeholder' not in src.lower() and '1x1' not in src.lower():
+                # Check if image has reasonable dimensions
+                width = img.get('width', '0')
+                height = img.get('height', '0')
+                try:
+                    if int(width) >= 300 or int(height) >= 300:
+                        print(f"✓ Thumbnail bulundu (content image): {src}")
+                        return src
+                except:
+                    print(f"✓ Thumbnail bulundu (content image): {src}")
+                    return src
+        
+        print("⚠ Makale sayfasında thumbnail bulunamadı")
+        return None
+        
+    except Exception as e:
+        print(f"✗ Makale sayfası okuma hatası: {e}")
+        return None
 
 def extract_youtube_thumbnail(entry, link):
     """Extract high-quality thumbnail from YouTube"""
@@ -225,6 +249,40 @@ def extract_youtube_thumbnail(entry, link):
     print("⚠ YouTube thumbnail bulunamadı")
     return None
 
+def create_beautiful_post(title, link, category=""):
+    """Create a beautiful, professional Bluesky post with proper formatting"""
+    
+    # Decode HTML entities in title
+    title = clean_html(title)
+    
+    # Add appropriate emoji based on category
+    category_emojis = {
+        'SPOR': '⚽',
+        'EKONOMİ': '💰',
+        'DÜNYA': '🌍',
+        'TÜRKİYE': '🇹🇷',
+        'KIBRIS': '🇨🇾',
+        'GÜNEY KIBRIS': '🇨🇾',
+        'SAĞLIK': '🏥',
+        'TEKNOLOJİ': '💻',
+        'KÜLTÜR': '🎭',
+        'SANAT': '🎨',
+    }
+    
+    emoji = category_emojis.get(category.upper(), '📰')
+    
+    # Create post with beautiful formatting
+    post_text = f"{emoji} Yeni Haber\n\n{title}\n\n🔗 Devamı için tıklayın"
+    
+    # Limit to 300 characters for Bluesky
+    if len(post_text) > 300:
+        # Trim title if too long
+        max_title_len = 300 - len(f"{emoji} Yeni Haber\n\n") - len("\n\n🔗 Devamı için tıklayın")
+        title_trimmed = title[:max_title_len-3] + "..."
+        post_text = f"{emoji} Yeni Haber\n\n{title_trimmed}\n\n🔗 Devamı için tıklayın"
+    
+    return post_text
+
 # Parse RSS feed with UTF-8 support
 print(f"\n{'='*60}")
 print(f"📰 RSS Feed İşleniyor: {RSS_URL}")
@@ -240,16 +298,22 @@ print(f"✓ RSS beslemesi okundu: {len(feed.entries)} içerik bulundu\n")
 
 entry = feed.entries[0]
 
-# Extract basic info
-title = entry.title
+# Extract basic info with proper encoding
+title = clean_html(entry.title)
 link = entry.link
-summary = entry.get("summary", entry.get("description", title))
-summary_clean = clean_html(summary)
+summary = clean_html(entry.get("summary", entry.get("description", "")))
+
+# Extract category
+categories = []
+if hasattr(entry, 'tags'):
+    categories = [tag.term for tag in entry.tags]
+category = categories[0] if categories else "GENEL"
 
 print(f"📌 En son içerik:")
 print(f"   Başlık: {title}")
 print(f"   Link: {link}")
-print(f"   Özet: {summary_clean[:100]}...")
+print(f"   Kategori: {category}")
+print(f"   Özet: {summary[:100]}...")
 
 # Check if already posted
 last_link = get_last_link()
@@ -273,7 +337,8 @@ thumbnail_url = None
 if is_youtube:
     thumbnail_url = extract_youtube_thumbnail(entry, link)
 else:
-    thumbnail_url = extract_wordpress_thumbnail(entry)
+    # For WordPress, fetch from article page (most reliable)
+    thumbnail_url = fetch_article_thumbnail(link)
 
 # Login to Bluesky
 print(f"\n🔐 Bluesky'a giriş yapılıyor...")
@@ -303,13 +368,13 @@ if thumbnail_url:
 else:
     print(f"⚠ Thumbnail bulunamadı, devam ediliyor...\n")
 
-# Create embed with proper Turkish character support
+# Create embed card with rich preview
 embed = {
     "$type": "app.bsky.embed.external",
     "external": {
         "uri": link,
         "title": title[:300],  # Bluesky title limit
-        "description": summary_clean[:300],  # Truncate description
+        "description": summary[:300] if summary else "Yeni Bakış Gazetesi'nde detayları okuyun.",
     },
 }
 
@@ -319,9 +384,8 @@ if thumb_blob:
 else:
     print(f"⚠ Embed thumbnail olmadan oluşturuldu")
 
-# Create post text with proper Turkish formatting
-# Use proper emoji that displays correctly
-post_text = f"📰 Yeni içerik yayında!\n\n{title[:280]}"
+# Create beautiful post text
+post_text = create_beautiful_post(title, link, category)
 
 # Post to Bluesky
 print(f"\n📤 Bluesky'a gönderiliyor...")
@@ -335,6 +399,7 @@ try:
     print(f"✅ BAŞARIYLA PAYLAŞILDI!")
     print(f"{'='*60}")
     print(f"📌 Başlık: {title}")
+    print(f"📂 Kategori: {category}")
     print(f"🔗 Link: {link}")
     print(f"🖼️  Thumbnail: {'Evet ✓' if thumb_blob else 'Hayır ✗'}")
     print(f"⏰ Zaman: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
