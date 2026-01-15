@@ -31,13 +31,6 @@ Credit goes to Dr. Nambili Samuel, the AI researcher and developer who built thi
 ### Prerequisites
 - Python 3.8+
 - BlueSky account 
-### Structure
-bluesky-rss-bot/
-├── post_to_bluesky.py
-├── last_post.txt
-├── requirements.txt
-├── README.md
-└── .env.example
 
 ### Dependencies
 ```bash
