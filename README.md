@@ -23,7 +23,7 @@ Credit goes to Dr. Nambili Samuel, the AI researcher and developer who built thi
 - Intelligent thumbnail extraction
 - Image optimization and compression
 - Duplicate prevention
-- Turkish character support
+- Language character formating
 - Error handling and logging
 
 ## Installation
