@@ -11,6 +11,8 @@ from PIL import Image
 import re
 from datetime import datetime
 from bs4 import BeautifulSoup
+import json
+import time
 
 # Force UTF-8 encoding for stdout
 if sys.stdout.encoding != 'utf-8':
@@ -20,21 +22,46 @@ RSS_URL = os.environ["RSS_URL"]
 BSKY_HANDLE = os.environ["BSKY_HANDLE"]
 BSKY_APP_PASSWORD = os.environ["BSKY_APP_PASSWORD"]
 
-STATE_FILE = "last_post.txt"
+# Track ALL posted links, not just the last one
+STATE_FILE = "posted_links.json"
 MAX_IMAGE_SIZE = 976_000  # ~950 KB (1MB limit with safety margin)
+# How many RSS entries to check each run (to avoid spamming)
+MAX_ENTRIES_TO_PROCESS = 10
+# Minimum time between posts to avoid rate limits (seconds)
+POST_DELAY = 2
 
-def get_last_link():
-    """Get the last posted article link"""
+def load_posted_links():
+    """Load all previously posted article links"""
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Backward compatibility: if it's a string (old format), convert to dict
+                if isinstance(data, str):
+                    return {data: datetime.now().isoformat()}
+                return data
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
 
-def save_last_link(link):
-    """Save the last posted article link"""
+def save_posted_links(links_dict):
+    """Save all posted article links with timestamps"""
+    # Keep only the last 1000 entries to prevent file from growing too large
+    if len(links_dict) > 1000:
+        # Sort by timestamp and keep most recent
+        sorted_items = sorted(links_dict.items(), key=lambda x: x[1], reverse=True)
+        links_dict = dict(sorted_items[:1000])
+    
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        f.write(link)
-    print(f"✓ Durum kaydedildi: {link[:50]}...")
+        json.dump(links_dict, f, ensure_ascii=False, indent=2)
+    print(f"✓ {len(links_dict)} link kaydedildi")
+
+def mark_as_posted(link):
+    """Mark a link as posted with current timestamp"""
+    posted_links = load_posted_links()
+    posted_links[link] = datetime.now().isoformat()
+    save_posted_links(posted_links)
+    print(f"✓ Link işaretlendi: {link[:50]}...")
 
 def optimize_image(image_data):
     """Optimize image to fit within size limit while maintaining quality"""
@@ -267,9 +294,18 @@ def create_beautiful_post(title, link, category=""):
         'TEKNOLOJİ': '💻',
         'KÜLTÜR': '🎭',
         'SANAT': '🎨',
+        'GENEL': '📰',
+        'POLİTİKA': '🏛️',
+        'HABER': '📢',
+        'GÜNCEL': '🆕',
     }
     
-    emoji = category_emojis.get(category.upper(), '📰')
+    # Try to find matching category
+    emoji = '📰'  # Default
+    for cat_key, cat_emoji in category_emojis.items():
+        if cat_key in category.upper():
+            emoji = cat_emoji
+            break
     
     # Create post with beautiful formatting
     post_text = f"{emoji} Yeni Haber\n\n{title}\n\n🔗 Devamı için tıklayın"
@@ -282,6 +318,92 @@ def create_beautiful_post(title, link, category=""):
         post_text = f"{emoji} Yeni Haber\n\n{title_trimmed}\n\n🔗 Devamı için tıklayın"
     
     return post_text
+
+def post_to_bluesky(client, entry):
+    """Post a single entry to Bluesky"""
+    title = clean_html(entry.title)
+    link = entry.link
+    summary = clean_html(entry.get("summary", entry.get("description", "")))
+    
+    # Extract category
+    categories = []
+    if hasattr(entry, 'tags'):
+        categories = [tag.term for tag in entry.tags]
+    category = categories[0] if categories else "GENEL"
+    
+    print(f"\n{'='*60}")
+    print(f"📌 İşleniyor: {title[:80]}...")
+    print(f"   Kategori: {category}")
+    print(f"   Link: {link}")
+    print(f"{'='*60}")
+    
+    # Detect source type and extract thumbnail
+    is_youtube = 'youtube.com' in RSS_URL.lower() or 'youtu.be' in RSS_URL.lower()
+    
+    thumbnail_url = None
+    if is_youtube:
+        thumbnail_url = extract_youtube_thumbnail(entry, link)
+    else:
+        # For WordPress, fetch from article page (most reliable)
+        thumbnail_url = fetch_article_thumbnail(link)
+    
+    # Fetch and upload thumbnail
+    thumb_blob = None
+    if thumbnail_url:
+        print(f"📸 Thumbnail işleniyor...")
+        image_data = fetch_image(thumbnail_url)
+        
+        if image_data:
+            try:
+                thumb_blob = client.upload_blob(image_data).blob
+                print(f"✓ Thumbnail Bluesky'a yüklendi")
+            except Exception as e:
+                print(f"✗ Thumbnail yükleme hatası: {e}")
+                print(f"⚠ Thumbnail olmadan devam ediliyor...")
+        else:
+            print(f"⚠ Thumbnail indirilemedi, devam ediliyor...")
+    else:
+        print(f"⚠ Thumbnail bulunamadı, devam ediliyor...")
+    
+    # Create embed card with rich preview
+    embed = {
+        "$type": "app.bsky.embed.external",
+        "external": {
+            "uri": link,
+            "title": title[:300],  # Bluesky title limit
+            "description": summary[:300] if summary else "Yeni Bakış Gazetesi'nde detayları okuyun.",
+        },
+    }
+    
+    if thumb_blob:
+        embed["external"]["thumb"] = thumb_blob
+        print(f"✓ Embed thumbnail ile oluşturuldu")
+    else:
+        print(f"⚠ Embed thumbnail olmadan oluşturuldu")
+    
+    # Create beautiful post text
+    post_text = create_beautiful_post(title, link, category)
+    
+    # Post to Bluesky
+    print(f"\n📤 Bluesky'a gönderiliyor...")
+    
+    try:
+        client.post(text=post_text, embed=embed)
+        mark_as_posted(link)
+        
+        print(f"\n✅ BAŞARIYLA PAYLAŞILDI!")
+        print(f"📌 Başlık: {title}")
+        print(f"📂 Kategori: {category}")
+        print(f"🔗 Link: {link}")
+        print(f"🖼️  Thumbnail: {'Evet ✓' if thumb_blob else 'Hayır ✗'}")
+        print(f"⏰ Zaman: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n✗ PAYLAŞIM HATASI!")
+        print(f"Hata: {e}")
+        return False
 
 # Parse RSS feed with UTF-8 support
 print(f"\n{'='*60}")
@@ -296,51 +418,11 @@ if not feed.entries:
 
 print(f"✓ RSS beslemesi okundu: {len(feed.entries)} içerik bulundu\n")
 
-entry = feed.entries[0]
+# Load previously posted links
+posted_links = load_posted_links()
+print(f"📊 Daha önce paylaşılan link sayısı: {len(posted_links)}")
 
-# Extract basic info with proper encoding
-title = clean_html(entry.title)
-link = entry.link
-summary = clean_html(entry.get("summary", entry.get("description", "")))
-
-# Extract category
-categories = []
-if hasattr(entry, 'tags'):
-    categories = [tag.term for tag in entry.tags]
-category = categories[0] if categories else "GENEL"
-
-print(f"📌 En son içerik:")
-print(f"   Başlık: {title}")
-print(f"   Link: {link}")
-print(f"   Kategori: {category}")
-print(f"   Özet: {summary[:100]}...")
-
-# Check if already posted
-last_link = get_last_link()
-if link == last_link:
-    print(f"\n⏭ Bu içerik zaten paylaşıldı.")
-    print(f"   Son paylaşılan: {last_link}")
-    print(f"   Şu anki içerik: {link}")
-    print(f"\n✓ Yeni içerik yok. Bot durdu.\n")
-    sys.exit(0)
-
-print(f"\n✅ YENİ İÇERİK TESPİT EDİLDİ!")
-print(f"   Son paylaşılan: {last_link if last_link else '(İlk paylaşım)'}")
-print(f"   Yeni içerik: {link}\n")
-
-# Detect source type and extract thumbnail
-is_youtube = 'youtube.com' in RSS_URL.lower() or 'youtu.be' in RSS_URL.lower()
-
-print(f"🔍 Kaynak tipi: {'YouTube' if is_youtube else 'WordPress/RSS'}\n")
-
-thumbnail_url = None
-if is_youtube:
-    thumbnail_url = extract_youtube_thumbnail(entry, link)
-else:
-    # For WordPress, fetch from article page (most reliable)
-    thumbnail_url = fetch_article_thumbnail(link)
-
-# Login to Bluesky
+# Login to Bluesky once (reuse connection)
 print(f"\n🔐 Bluesky'a giriş yapılıyor...")
 client = Client()
 try:
@@ -350,65 +432,41 @@ except Exception as e:
     print(f"✗ Bluesky giriş hatası: {e}")
     sys.exit(1)
 
-# Fetch and upload thumbnail
-thumb_blob = None
-if thumbnail_url:
-    print(f"📸 Thumbnail işleniyor...")
-    image_data = fetch_image(thumbnail_url)
+# Process entries in reverse order (oldest to newest) to maintain chronological order
+# But limit to most recent entries to avoid processing too many
+entries_to_process = feed.entries[:MAX_ENTRIES_TO_PROCESS]
+print(f"⏳ İşlenecek içerik sayısı: {len(entries_to_process)}")
+
+new_posts_count = 0
+
+# Process from newest to oldest (so newest appears first)
+for i, entry in enumerate(entries_to_process):
+    link = entry.link
     
-    if image_data:
-        try:
-            thumb_blob = client.upload_blob(image_data).blob
-            print(f"✓ Thumbnail Bluesky'a yüklendi\n")
-        except Exception as e:
-            print(f"✗ Thumbnail yükleme hatası: {e}")
-            print(f"⚠ Thumbnail olmadan devam ediliyor...\n")
-    else:
-        print(f"⚠ Thumbnail indirilemedi, devam ediliyor...\n")
-else:
-    print(f"⚠ Thumbnail bulunamadı, devam ediliyor...\n")
+    # Skip if already posted
+    if link in posted_links:
+        title = clean_html(entry.title)[:60]
+        print(f"\n⏭ Zaten paylaşıldı: {title}...")
+        continue
+    
+    # Post to Bluesky
+    success = post_to_bluesky(client, entry)
+    if success:
+        new_posts_count += 1
+        
+        # Add delay between posts to avoid rate limits (except for last post)
+        if i < len(entries_to_process) - 1:
+            print(f"\n⏳ {POST_DELAY} saniye bekleniyor...")
+            time.sleep(POST_DELAY)
 
-# Create embed card with rich preview
-embed = {
-    "$type": "app.bsky.embed.external",
-    "external": {
-        "uri": link,
-        "title": title[:300],  # Bluesky title limit
-        "description": summary[:300] if summary else "Yeni Bakış Gazetesi'nde detayları okuyun.",
-    },
-}
-
-if thumb_blob:
-    embed["external"]["thumb"] = thumb_blob
-    print(f"✓ Embed thumbnail ile oluşturuldu")
-else:
-    print(f"⚠ Embed thumbnail olmadan oluşturuldu")
-
-# Create beautiful post text
-post_text = create_beautiful_post(title, link, category)
-
-# Post to Bluesky
-print(f"\n📤 Bluesky'a gönderiliyor...")
+print(f"\n{'='*60}")
+print(f"📊 İŞLEM TAMAMLANDI")
 print(f"{'='*60}")
+print(f"Toplam kontrol edilen içerik: {len(entries_to_process)}")
+print(f"Yeni paylaşılan içerik: {new_posts_count}")
+print(f"Zaten paylaşılmış içerik: {len(entries_to_process) - new_posts_count}")
+print(f"Toplam kayıtlı link: {len(load_posted_links())}")
+print(f"{'='*60}\n")
 
-try:
-    client.post(text=post_text, embed=embed)
-    save_last_link(link)
-    
-    print(f"\n{'='*60}")
-    print(f"✅ BAŞARIYLA PAYLAŞILDI!")
-    print(f"{'='*60}")
-    print(f"📌 Başlık: {title}")
-    print(f"📂 Kategori: {category}")
-    print(f"🔗 Link: {link}")
-    print(f"🖼️  Thumbnail: {'Evet ✓' if thumb_blob else 'Hayır ✗'}")
-    print(f"⏰ Zaman: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*60}\n")
-    
-except Exception as e:
-    print(f"\n{'='*60}")
-    print(f"✗ PAYLAŞIM HATASI!")
-    print(f"{'='*60}")
-    print(f"Hata: {e}")
-    print(f"{'='*60}\n")
-    sys.exit(1)
+if new_posts_count == 0:
+    print("ℹ️ Yeni içerik bulunamadı.")
