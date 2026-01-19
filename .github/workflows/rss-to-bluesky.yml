@@ -43,7 +43,7 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add last_post.txt || true
-          git commit -m "Update last post state" || true
+          git add posted_links.json || true
+          git commit -m "Update posted links state" || true
           git push || true
         continue-on-error: true
