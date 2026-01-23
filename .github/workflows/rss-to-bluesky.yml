@@ -23,17 +23,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install atproto feedparser requests Pillow beautifulsoup4
 
-      - name: Run WordPress RSS bot
+      - name: Run YouTube RSS bot
         env:
-          RSS_URL: https://yenibakisgazetesi.com/feed/
+          RSS_URL: https://www.youtube.com/feeds/videos.xml?channel_id=UCPM8fdDZH_cwTgXUBsmj8Qw
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
         run: |
           python post_to_bluesky.py
 
-      - name: Run YouTube RSS bot
+      - name: Run WordPress RSS bot
         env:
-          RSS_URL: https://www.youtube.com/feeds/videos.xml?channel_id=UCPM8fdDZH_cwTgXUBsmj8Qw
+          RSS_URL: https://yenibakisgazetesi.com/feed/
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
         run: |
