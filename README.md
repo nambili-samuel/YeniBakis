@@ -2,7 +2,7 @@
 
 For months, I have been actively getting my hands dirty building social media bots, from WhatsApp and Telegram to X and Bluesky, including website bots. Building your own AI bot and self-hosting it, is the best way forward.
 
-I have built bots from scratch before, but this time I created a fully self-running Bluesky bot hosted on GitHub Actions. This free, open-source project takes a much more hands-off approach: complete automation with no human oversight needed once the bot is deployed. It is not as terrifying as it sounds, especially since I intended to keep things straightforward.
+I have built many bots from scratch before, but this time I created a fully self-running Bluesky bot hosted on GitHub Actions. This free, open-source project takes a much more hands-off approach: complete automation with no human oversight needed once the bot is deployed. It is not as terrifying as it sounds, especially since I intended to keep things straightforward.
 
 The bot's workflow is simple: scrape a landing page, retrieve news and related images from the website, scrape YouTube, summarise each piece of content, and then post it to Bluesky. Easy!
 
